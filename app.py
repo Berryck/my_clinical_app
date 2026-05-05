@@ -10,10 +10,38 @@ import matplotlib.pyplot as plt
 # ========== IMPORTANT: set_page_config must be the first st command ==========
 st.set_page_config(page_title="Clinical Decision Support System", layout="wide", page_icon="🏥")
 
+
 # --- 0. Helper functions ---
 def st_shap(plot, height=None):
     shap_html = f"<head>{shap.getjs()}</head><body>{plot.html()}</body>"
     components.html(shap_html, height=height if height else 150, scrolling=True)
+
+
+def get_positive_class_shap(explainer, x_scaled, positive_class=1):
+    """Return SHAP values/base value for one class in a version-compatible way."""
+    shap_values_all = explainer.shap_values(x_scaled)
+    expected_value = explainer.expected_value
+
+    if isinstance(shap_values_all, list):
+        shap_values = shap_values_all[positive_class]
+        base_value = expected_value[positive_class]
+    else:
+        shap_values_all = np.asarray(shap_values_all)
+
+        if shap_values_all.ndim == 3:
+            # Newer SHAP versions may return: (n_samples, n_features, n_outputs).
+            shap_values = shap_values_all[:, :, positive_class]
+            base_value = np.asarray(expected_value)[positive_class]
+        else:
+            shap_values = shap_values_all
+            expected_value = np.asarray(expected_value)
+            if expected_value.ndim > 0 and expected_value.size > 1:
+                base_value = expected_value[positive_class]
+            else:
+                base_value = expected_value.item() if expected_value.ndim == 0 else expected_value[0]
+
+    return shap_values, base_value
+
 
 # --- 1. Cache resource loading ---
 @st.cache_resource
@@ -32,7 +60,8 @@ def load_artifacts():
         with open("saved_models/feature_names.pkl", "rb") as f:
             feature_names = pickle.load(f)
 
-    return model, scaler, feature_names
+    return model, scaler, list(feature_names)
+
 
 # Initialize loading (after set_page_config)
 try:
@@ -41,11 +70,14 @@ except FileNotFoundError:
     st.error("❌ Error: Model files not found. Please check the saved_models/ directory for .pkl files.")
     st.stop()
 
+
 # --- 2. Page title ---
 st.title("🏥  Clinical Risk Prediction System")
 
+
 # --- 3. Create tabs ---
 tab1, tab2 = st.tabs(["📝 Single Prediction (Manual Input)", "📂 Batch Prediction (Upload Excel)"])
+
 
 # ==========================================
 # Mode 1: Single Prediction
@@ -89,44 +121,38 @@ with tab1:
                 st.subheader("Individual Attribution Analysis")
                 with st.spinner("Calculating feature contributions..."):
                     explainer = shap.TreeExplainer(model)
-                    shap_values_all = explainer.shap_values(x_scaled)
-
-                    if isinstance(shap_values_all, list):
-                        shap_values = shap_values_all[1]
-                        base_value = explainer.expected_value[1]
-                    else:
-                        shap_values = shap_values_all
-                        base_value = explainer.expected_value
-                        if isinstance(base_value, np.ndarray):
-                            base_value = base_value[0]
+                    shap_values, base_value = get_positive_class_shap(explainer, x_scaled)
+                    sv = np.asarray(shap_values[0]).reshape(-1)
 
                     st.markdown("**1. Waterfall Plot**")
                     explanation = shap.Explanation(
-                        values=shap_values[0],
+                        values=sv,
                         base_values=base_value,
-                        data=x_df.iloc[0],
-                        feature_names=feature_names
+                        data=x_df.iloc[0].to_numpy(),
+                        feature_names=feature_names,
                     )
                     fig = plt.figure(figsize=(10, 5))
                     shap.plots.waterfall(explanation, max_display=10, show=False)
-                    st.pyplot(fig, bbox_inches='tight')
+                    st.pyplot(fig, bbox_inches="tight")
                     plt.close(fig)
 
                     st.markdown("**2. Force Plot**")
                     st.caption("Hover over the plot to see specific values.")
                     force_plot_html = shap.force_plot(
                         base_value,
-                        shap_values[0],
+                        sv,
                         x_df.iloc[0],
                         feature_names=feature_names,
-                        matplotlib=False
+                        matplotlib=False,
                     )
                     st_shap(force_plot_html, height=160)
 
         except Exception as e:
             st.error(f"Error during execution: {e}")
             import traceback
+
             st.text(traceback.format_exc())
+
 
 # ==========================================
 # Mode 2: Batch Prediction
@@ -137,20 +163,20 @@ with tab2:
     with st.expander("📥 Download Data Template"):
         st.write("Please ensure your file contains the following columns:")
         st.code(str(feature_names), language="python")
-        template_df = pd.DataFrame(columns=['Patient_ID'] + feature_names)
-        csv = template_df.to_csv(index=False).encode('utf-8')
+        template_df = pd.DataFrame(columns=["Patient_ID"] + feature_names)
+        csv = template_df.to_csv(index=False).encode("utf-8")
         st.download_button("Download CSV Template", csv, "prediction_template.csv", "text/csv")
 
     uploaded_file = st.file_uploader("Upload file", type=["xlsx", "csv"])
 
     if uploaded_file:
         try:
-            if uploaded_file.name.endswith('.csv'):
+            if uploaded_file.name.endswith(".csv"):
                 try:
                     df_upload = pd.read_csv(uploaded_file)
                 except UnicodeDecodeError:
                     uploaded_file.seek(0)
-                    df_upload = pd.read_csv(uploaded_file, encoding='gbk')
+                    df_upload = pd.read_csv(uploaded_file, encoding="gbk")
             else:
                 df_upload = pd.read_excel(uploaded_file)
 
@@ -171,24 +197,27 @@ with tab2:
                     probs = model.predict(X_batch_scaled)
 
                 df_result = df_upload.copy()
-                df_result['Predicted Probability'] = np.round(probs, 4)
-                df_result['Risk Level'] = [
-                    'High Risk' if p > 0.5 else 'Low Risk' for p in probs
+                df_result["Predicted Probability"] = np.round(probs, 4)
+                df_result["Risk Level"] = [
+                    "High Risk" if p > 0.5 else "Low Risk" for p in probs
                 ]
 
                 st.subheader("📊 Prediction Results Overview")
-                st.dataframe(df_result.style.map(
-                    lambda x: 'background-color: #ffcccc'
-                    if x == 'High Risk' else 'background-color: #ccffcc',
-                    subset=['Risk Level']
-                ))
+                st.dataframe(
+                    df_result.style.map(
+                        lambda x: "background-color: #ffcccc"
+                        if x == "High Risk"
+                        else "background-color: #ccffcc",
+                        subset=["Risk Level"],
+                    )
+                )
 
-                csv_result = df_result.to_csv(index=False).encode('utf-8-sig')
+                csv_result = df_result.to_csv(index=False).encode("utf-8-sig")
                 st.download_button(
                     "💾 Download Prediction Results (.csv)",
                     csv_result,
                     "prediction_results.csv",
-                    "text/csv"
+                    "text/csv",
                 )
 
                 st.divider()
@@ -196,35 +225,31 @@ with tab2:
                 selected_index = st.selectbox(
                     "Select the row index to analyze",
                     options=df_result.index,
-                    format_func=lambda
-                        x: f"Row {x} (Probability: {df_result.loc[x, 'Predicted Probability']:.2%})"
+                    format_func=lambda x: (
+                        f"Row {x} (Probability: "
+                        f"{df_result.loc[x, 'Predicted Probability']:.2%})"
+                    ),
                 )
 
                 if st.button("Explain this patient"):
-                    x_single_df = X_batch.iloc[[selected_index]]
-                    x_single_scaled = X_batch_scaled[selected_index].reshape(1, -1)
+                    row_pos = df_result.index.get_loc(selected_index)
+                    x_single_df = X_batch.loc[[selected_index]]
+                    x_single_scaled = X_batch_scaled[row_pos].reshape(1, -1)
 
                     explainer = shap.TreeExplainer(model)
-                    shap_values_all = explainer.shap_values(x_single_scaled)
-
-                    if isinstance(shap_values_all, list):
-                        sv = shap_values_all[1][0]
-                        bv = explainer.expected_value[1]
-                    else:
-                        sv = shap_values_all[0]
-                        bv = explainer.expected_value
-                        if isinstance(bv, np.ndarray):
-                            bv = bv[0]
+                    shap_values, bv = get_positive_class_shap(explainer, x_single_scaled)
+                    sv = np.asarray(shap_values[0]).reshape(-1)
 
                     st.markdown("**1. Waterfall Plot**")
                     exp = shap.Explanation(
-                        values=sv, base_values=bv,
-                        data=x_single_df.iloc[0],
-                        feature_names=feature_names
+                        values=sv,
+                        base_values=bv,
+                        data=x_single_df.iloc[0].to_numpy(),
+                        feature_names=feature_names,
                     )
                     fig_batch = plt.figure(figsize=(10, 5))
                     shap.plots.waterfall(exp, max_display=10, show=False)
-                    st.pyplot(fig_batch, bbox_inches='tight')
+                    st.pyplot(fig_batch, bbox_inches="tight")
                     plt.close(fig_batch)
 
                     st.markdown("**2. Force Plot**")
@@ -233,7 +258,7 @@ with tab2:
                         sv,
                         x_single_df.iloc[0],
                         feature_names=feature_names,
-                        matplotlib=False
+                        matplotlib=False,
                     )
                     st_shap(force_plot_html_batch, height=160)
 
