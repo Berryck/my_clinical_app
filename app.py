@@ -18,7 +18,7 @@ def st_shap(plot, height=None):
 # --- 1. Cache resource loading ---
 @st.cache_resource
 def load_artifacts():
-    model = joblib.load("saved_models/LightGBM_Optimized.pkl")
+    model = joblib.load("saved_models/Random_Forest.pkl")
 
     try:
         scaler = joblib.load("saved_models/scaler1.pkl")
@@ -42,7 +42,7 @@ except FileNotFoundError:
     st.stop()
 
 # --- 2. Page title ---
-st.title("🏥 LightGBM-based Clinical Risk Prediction System")
+st.title("🏥  Clinical Risk Prediction System")
 
 # --- 3. Create tabs ---
 tab1, tab2 = st.tabs(["📝 Single Prediction (Manual Input)", "📂 Batch Prediction (Upload Excel)"])
